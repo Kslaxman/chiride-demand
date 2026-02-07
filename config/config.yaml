@@ -1,0 +1,123 @@
+# =============================================
+# PROJECT CONFIGURATION
+# =============================================
+
+project:
+  name: "Chicago Ride Demand Forecasting"
+  version: "0.1.0"
+  author: "Sailaxman Kotha"
+  description: >
+    Spatiotemporal demand forecasting for rideshare pickups
+    in Chicago using H3 hexagonal grids, XGBoost, and
+    deep learning models.
+
+# ---- DATA SETTINGS ----
+data:
+  # Chicago Data Portal API endpoint
+  # This is the Socrata API for the Transportation Network Providers dataset
+  # Dataset page: https://data.cityofchicago.org/Transportation/
+  #               Transportation-Network-Providers-Trips-2018-2022-/m6dm-c72p
+  base_url: "https://data.cityofchicago.org/resource/m6dm-c72p.json"
+
+  # API token
+  # Without token: limited to 1000 requests/hour
+  # With token: 10,000 requests/hour
+  app_token: nudqnKT7WJ4ATfD7q04qtQQQX7Cll
+  start_date: "2022-01-01"
+  end_date: "2025-02-27"
+
+  # H3 Resolution (controls hexagon size)
+  # Resolution 7: ~1.2km edge (~5.16 km² area) — neighborhood level
+  # Resolution 8: ~460m edge (~0.74 km²) — block group level ← WE USE THIS
+  # Resolution 9: ~174m edge (~0.10 km²) — individual blocks
+  #
+  # Why resolution 8?
+  # - Fine enough to capture different demand patterns
+  # - Coarse enough that hexes have enough data to model
+  # - Similar to what Uber actually uses
+  h3_resolution: 8
+
+  # Time bin size in minutes
+  # 60 = hourly predictions (good starting point)
+  # 15 = quarter-hourly (harder but more useful)
+  # We start with 60 and can go to 15 later
+  time_bin_minutes: 60
+
+  # File paths
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  external_dir: "data/external"
+
+  # Download settings
+  chunk_size: 50000  # rows per API call
+  max_retries: 3
+  retry_delay: 5  # seconds
+
+# ---- FEATURE SETTINGS ----
+features:
+  # Minimum trips per day for a hex to be "active"
+  # Hexes with very few trips are noise, not signal
+  min_trips_per_day: 1
+
+  # Lag features (in hours)
+  # These are the "memory" features — what happened before?
+  lag_hours: [1, 2, 3, 6, 12, 24, 48, 168]
+  # 168 = 7 days (same hour last week)
+
+  # Rolling window sizes (in hours)
+  rolling_windows: [6, 12, 24, 72, 168]
+
+# ---- MODEL SETTINGS ----
+model:
+  target: "demand_count"
+
+  # Train/test split date
+  # Everything before this: training
+  # Everything after: testing
+  # We use the last 3 months (Dec 2024 - Feb 2025) for testing
+  test_start_date: "2024-12-01"
+
+  # Validation: last 3 months of training data
+  val_start_date: "2024-09-01"
+
+  # Cross-validation strategy
+  # ALWAYS use temporal CV for time series
+  # Never randomly shuffle time series data
+  cv_strategy: "temporal"
+  n_cv_splits: 5
+
+  # Random seed for reproducibility
+  random_seed: 42
+
+# ---- EXTERNAL DATA ----
+external:
+  # Weather API (we'll set this up later)
+  # Free tier: https://openweathermap.org/api
+  weather_api_key: n5a5230ef002b8590031eabdc9af144efl
+
+  # Chicago-specific locations for distance features
+  landmarks:
+    loop_center:
+      lat: 41.8819
+      lon: -87.6278
+    ohare_airport:
+      lat: 41.9742
+      lon: -87.9073
+    midway_airport:
+      lat: 41.7868
+      lon: -87.7522
+    wrigley_field:
+      lat: 41.9484
+      lon: -87.6553
+    soldier_field:
+      lat: 41.8623
+      lon: -87.6167
+    united_center:
+      lat: 41.8807
+      lon: -87.6742
+    navy_pier:
+      lat: 41.8917
+      lon: -87.6086
+    mccormick_place:
+      lat: 41.8512
+      lon: -87.6154
