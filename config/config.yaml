@@ -1,6 +1,4 @@
-# =============================================
 # PROJECT CONFIGURATION
-# =============================================
 
 project:
   name: "Chicago Ride Demand Forecasting"
@@ -11,12 +9,11 @@ project:
     in Chicago using H3 hexagonal grids, XGBoost, and
     deep learning models.
 
-# ---- DATA SETTINGS ----
+# DATA SETTINGS 
 data:
   # Chicago Data Portal API endpoint
   # This is the Socrata API for the Transportation Network Providers dataset
-  # Dataset page: https://data.cityofchicago.org/Transportation/
-  #               Transportation-Network-Providers-Trips-2018-2022-/m6dm-c72p
+  # Dataset page: https://data.cityofchicago.org/Transportation/Transportation-Network-Providers-Trips-2018-2022-/m6dm-c72p
   base_url: "https://data.cityofchicago.org/resource/m6dm-c72p.json"
 
   # API token
@@ -53,7 +50,7 @@ data:
   max_retries: 3
   retry_delay: 5  # seconds
 
-# ---- FEATURE SETTINGS ----
+# FEATURE SETTINGS 
 features:
   # Minimum trips per day for a hex to be "active"
   # Hexes with very few trips are noise, not signal
@@ -67,7 +64,7 @@ features:
   # Rolling window sizes (in hours)
   rolling_windows: [6, 12, 24, 72, 168]
 
-# ---- MODEL SETTINGS ----
+# MODEL SETTINGS
 model:
   target: "demand_count"
 
@@ -86,10 +83,9 @@ model:
   cv_strategy: "temporal"
   n_cv_splits: 5
 
-  # Random seed for reproducibility
   random_seed: 42
 
-# ---- EXTERNAL DATA ----
+# EXTERNAL DATA
 external:
   # Weather API (we'll set this up later)
   # Free tier: https://openweathermap.org/api
