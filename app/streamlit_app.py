@@ -8,7 +8,6 @@ import os
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import professional styling and data
 from app.utils.styling import get_custom_css, metric_card, glass_card, status_badge
 from app.utils.data_loader import (
     load_h3_data, load_citywide_data,
@@ -36,22 +35,297 @@ with st.sidebar:
     st.page_link("pages/about.py", label="Project Documentation", icon=None)
     st.markdown("---")
     
-    # Background API Startup (For Streamlit Deployment environment)
     @st.cache_resource
     def ensure_api_running():
+        import os, time, json, math, joblib, threading, subprocess
+        import numpy as np
+        from pathlib import Path
+        from fastapi import FastAPI
+        from fastapi.middleware.cors import CORSMiddleware
+        from pydantic import BaseModel, Field
+        from typing import List, Optional
+        from datetime import datetime as dt_type
+        import uvicorn
         import requests
-        import subprocess
-        api_url = os.getenv("API_URL", "http://localhost:8000")
-        try:
-            r = requests.get(f"{api_url}/health", timeout=1)
-            if r.status_code == 200:
-                return True
-        except:
-            pass
-        # Not running, start it using subprocess
-        cmd = [sys.executable, "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-        # Use Popen to launch it detached from Streamlit's blocking thread
-        subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        PROJECT_ROOT_DIR = "/Volumes/T7/DS Projects/Chicago Ride Demand Forecasting"
+        os.chdir(PROJECT_ROOT_DIR)
+
+        # kill old server
+        subprocess.run(["pkill", "-9", "-f", "uvicorn"], capture_output=True)
+        time.sleep(2)
+
+        BEST_DIR = Path("models/best")
+        DATA_DIR = Path("data/processed")
+
+        MODELS = {}
+        METADATA = {}
+        FEATURES = {}
+
+        for target in ["T1", "T2", "T3", "T4"]:
+            target_dir = BEST_DIR / target
+            if not target_dir.exists():
+                continue
+            for algo_dir in target_dir.iterdir():
+                if not algo_dir.is_dir():
+                    continue
+                mf = algo_dir / "model.joblib"
+                mt = algo_dir / "metadata.json"
+                if mf.exists() and mt.exists():
+                    MODELS[target] = joblib.load(mf)
+                    with open(mt) as f:
+                        METADATA[target] = json.load(f)
+                    FEATURES[target] = METADATA[target].get("feature_names", [])
+                    print(f"✅ {target}: {len(FEATURES[target])} features")
+                    break
+
+        FCACHE = joblib.load(DATA_DIR / "feature_cache.joblib")
+        print("✅ Feature cache loaded")
+        print("   h3_hour:", len(FCACHE["h3_hour"]))
+        print("   h3:", len(FCACHE["h3"]))
+        print("   city_hour:", len(FCACHE["city_hour"]))
+
+        # warmup
+        for target in MODELS:
+            X = np.zeros((3, len(FEATURES[target])))
+            MODELS[target].predict(X)
+
+        print("✅ Models warmed up")
+
+        def build_features(dt, h3_index=None, temp=None, hum=None, wind=None, precip=None):
+            """
+            Build features using REAL cached values.
+            """
+            h = dt.hour
+            dow = dt.weekday()
+            dom = dt.day
+            p = precip or 0.0
+
+            f = {}
+
+            if h in FCACHE["city_hour"]:
+                f.update(FCACHE["city_hour"][h])
+            else:
+                f.update(FCACHE["city_global"])
+
+            if h3_index is not None:
+                h3_hour_key = f"{h3_index}_{h}"
+                if h3_hour_key in FCACHE["h3_hour"]:
+                    f.update(FCACHE["h3_hour"][h3_hour_key])
+                elif h3_index in FCACHE["h3"]:
+                    f.update(FCACHE["h3"][h3_index])
+                else:
+                    f.update(FCACHE["h3_global"])
+
+            f["hour"] = float(h)
+            f["day_of_week"] = float(dow)
+            f["week_of_year"] = float(dt.isocalendar()[1])
+            f["hour_sin"] = math.sin(2 * math.pi * h / 24)
+            f["hour_cos"] = math.cos(2 * math.pi * h / 24)
+            f["dow_sin"] = math.sin(2 * math.pi * dow / 7)
+            f["dow_cos"] = math.cos(2 * math.pi * dow / 7)
+            f["dom_sin"] = math.sin(2 * math.pi * dom / 31)
+            f["dom_cos"] = math.cos(2 * math.pi * dom / 31)
+
+            f["temperature_f"] = temp if temp is not None else f.get("temperature_f", 50.0)
+            f["humidity"] = hum if hum is not None else f.get("humidity", 72.0)
+            f["wind_speed_kmh"] = (wind * 1.60934) if wind is not None else f.get("wind_speed_kmh", 16.0)
+            f["precipitation_mm"] = (p * 25.4)
+            f["is_raining"] = 1.0 if p > 0 else 0.0
+
+            if "snowfall_cm" not in f:
+                f["snowfall_cm"] = 0.0
+            if "is_snowing" not in f:
+                f["is_snowing"] = 0.0
+            if "weather_code" not in f:
+                f["weather_code"] = 0.0
+            if "weather_misery" not in f:
+                f["weather_misery"] = 0.0
+
+            return f
+
+
+        def predict_all(dt, h3_index=None, temperature=None, humidity=None,
+                        wind_speed=None, precipitation=None):
+            feat_dict = build_features(dt, h3_index, temperature, humidity, wind_speed, precipitation)
+            results = {}
+
+            for target in MODELS:
+                feat_list = FEATURES[target]
+                X = np.array([[feat_dict.get(ft, 0.0) for ft in feat_list]], dtype=np.float64)
+                raw = float(MODELS[target].predict(X)[0])
+                task = METADATA[target].get("task_type", "regression")
+
+                if task == "regression":
+                    val = round(max(raw, 0.0))
+                else:
+                    val = int(round(raw))
+
+                results[target] = {
+                    "value": val,
+                    "raw": raw,
+                    "name": METADATA[target].get("target_name", target),
+                    "task": task
+                }
+            return results
+
+
+        def predict_batch(requests_list):
+            if not requests_list:
+                return []
+
+            master_features = [
+                build_features(
+                    r["pickup_datetime"],
+                    r.get("h3_index"),
+                    r.get("temperature"),
+                    r.get("humidity"),
+                    r.get("wind_speed"),
+                    r.get("precipitation"),
+                )
+                for r in requests_list
+            ]
+
+            model_preds = {}
+            for target in MODELS:
+                feat_list = FEATURES[target]
+                task = METADATA[target].get("task_type", "regression")
+                name = METADATA[target].get("target_name", target)
+
+                X = np.array(
+                    [[mf.get(ft, 0.0) for ft in feat_list] for mf in master_features],
+                    dtype=np.float64
+                )
+
+                raw_preds = MODELS[target].predict(X)
+
+                preds = []
+                for raw in raw_preds:
+                    raw = float(raw)
+                    if task == "regression":
+                        val = round(max(raw, 0.0))
+                    else:
+                        val = int(round(raw))
+                    preds.append({
+                        "value": val,
+                        "raw": raw,
+                        "name": name,
+                        "task": task
+                    })
+                model_preds[target] = preds
+
+            n = len(requests_list)
+            return [{target: model_preds[target][i] for target in MODELS} for i in range(n)]
+
+
+        class PredReq(BaseModel):
+            h3_index: Optional[str] = None
+            pickup_datetime: dt_type = Field(...)
+            temperature: Optional[float] = None
+            humidity: Optional[float] = None
+            wind_speed: Optional[float] = None
+            precipitation: Optional[float] = None
+
+        class BatchReq(BaseModel):
+            predictions: List[PredReq]
+
+        app = FastAPI(title="Chicago Ride Demand API")
+        app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                           allow_methods=["*"], allow_headers=["*"])
+
+        @app.get("/health")
+        async def health():
+            return {
+                "status": "healthy",
+                "model_loaded": True,
+                "models_loaded": list(MODELS.keys()),
+                "model_count": len(MODELS),
+            }
+
+        @app.post("/predict")
+        async def api_predict(req: PredReq):
+            t0 = time.time()
+            results = predict_all(
+                req.pickup_datetime,
+                req.h3_index,
+                req.temperature,
+                req.humidity,
+                req.wind_speed,
+                req.precipitation,
+            )
+            ms = (time.time() - t0) * 1000
+            t3 = results.get("T3", {"value": 0, "raw": 0.0})
+
+            return {
+                "h3_index": req.h3_index,
+                "pickup_datetime": req.pickup_datetime.isoformat(),
+                "predictions": results,
+                "predicted_rides": t3["value"],
+                "predicted_rides_raw": t3["raw"],
+                "model_info": {
+                    "inference_ms": round(ms, 2),
+                    "models": list(results.keys())
+                }
+            }
+
+        @app.post("/predict/batch")
+        async def api_batch(req: BatchReq):
+            t0 = time.time()
+            req_dicts = [
+                {
+                    "pickup_datetime": r.pickup_datetime,
+                    "h3_index": r.h3_index,
+                    "temperature": r.temperature,
+                    "humidity": r.humidity,
+                    "wind_speed": r.wind_speed,
+                    "precipitation": r.precipitation,
+                }
+                for r in req.predictions
+            ]
+
+            batch_results = predict_batch(req_dicts)
+            ms = (time.time() - t0) * 1000
+
+            responses = []
+            for i, results in enumerate(batch_results):
+                r = req.predictions[i]
+                t3 = results.get("T3", {"value": 0, "raw": 0.0})
+                responses.append({
+                    "h3_index": r.h3_index,
+                    "pickup_datetime": r.pickup_datetime.isoformat(),
+                    "predictions": results,
+                    "predicted_rides": t3["value"],
+                    "predicted_rides_raw": t3["raw"],
+                    "model_info": {}
+                })
+
+            return {
+                "predictions": responses,
+                "count": len(responses),
+                "model_info": {
+                    "total_ms": round(ms, 2),
+                    "avg_ms": round(ms / max(len(responses), 1), 2)
+                }
+            }
+
+        def run_server():
+            # Run without reloading so it works perfectly in thread
+            uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+
+        print("Starting server...")
+        for i in range(10):
+            time.sleep(1)
+            try:
+                r = requests.get("http://127.0.0.1:8000/health", timeout=3)
+                if r.status_code == 200:
+                    print("✅ API running at http://127.0.0.1:8000")
+                    break
+            except:
+                print(f"waiting... {i+1}")
+        
         return True
 
     ensure_api_running()
@@ -69,7 +343,6 @@ with st.sidebar:
         st.markdown(f"API STATUS: {status_badge('INITIALIZING')}", unsafe_allow_html=True)
         st.caption("Engine is booting up... please wait.")
 
-# Main Hero
 st.markdown("""
 <div class="hero-container">
     <div class="hero-title">Chicago Ride <span>Demand</span> Forecasting</div>
@@ -79,7 +352,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Executive Summary Section
 st.markdown("## PROJECT SUMMARY")
 col_summary_1, col_summary_2 = st.columns([2, 1])
 
@@ -131,7 +403,6 @@ with c4:
 
 st.markdown("<br><br>", unsafe_allow_html=True)
 
-# System Architecture (Full-Width Enlarged)
 st.markdown("## SYSTEM ARCHITECTURE & DATA LINEAGE")
 st.graphviz_chart("""
 digraph G {
@@ -159,7 +430,6 @@ digraph G {
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Model Performance Inventory Table
 st.markdown("## PRODUCTION MODEL INVENTORY")
 if models_meta:
     rows = []
