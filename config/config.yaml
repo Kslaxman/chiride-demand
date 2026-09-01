@@ -19,7 +19,7 @@ data:
   # API token
   # Without token: limited to 1000 requests/hour
   # With token: 10,000 requests/hour
-  app_token: nudqnKT7WJ4ATfD7q04qtQQQX7Cll
+  app_token: [your-token]
   start_date: "2022-01-01"
   end_date: "2025-02-27"
 
@@ -89,7 +89,7 @@ model:
 external:
   # Weather API (we'll set this up later)
   # Free tier: https://openweathermap.org/api
-  weather_api_key: n5a5230ef002b8590031eabdc9af144efl
+  weather_api_key: [your-weather-api]
 
   # Chicago-specific locations for distance features
   landmarks:
